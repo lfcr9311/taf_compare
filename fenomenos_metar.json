@@ -1,0 +1,81 @@
+{
+  "descritores": {
+    "MI": "Baixo",
+    "BC": "Banco",
+    "PR": "Parcial (cobrindo parte do aeródromo)",
+    "DR": "Flutuante",
+    "BL": "Soprada",
+    "SH": "Pancada(s)",
+    "FZ": "Congelante"
+  },
+  "precipitacoes": {
+    "DZ": "Chuvisco",
+    "RA": "Chuva",
+    "SN": "Neve",
+    "SG": "Grãos de neve",
+    "PL": "Pelotas de gelo",
+    "GR": "Granizo",
+    "GS": "Granizo pequeno e/ou grãos de neve"
+  },
+  "obscurecedores": {
+    "BR": "Névoa úmida",
+    "FG": "Nevoeiro",
+    "FU": "Fumaça",
+    "VA": "Cinzas vulcânicas",
+    "DU": "Poeira extensa",
+    "SA": "Areia",
+    "HZ": "Névoa seca"
+  },
+  "outros": {
+    "PO": "Poeira/areia em redemoinhos",
+    "SQ": "Tempestade",
+    "FC": "Nuvem(ns) funil (tornado ou tromba d'água)",
+    "SS": "Tempestade de areia",
+    "DS": "Tempestade de poeira",
+    "TS": "Trovoada, Raios e Relâmpagos"
+  },
+  "intensidades": {
+    "-": "Leve",
+    "": "Moderada",
+    "+": "Forte"
+  },
+  "exemplos": [
+    {
+      "metar": "-RA",
+      "intensidade": "Leve",
+      "fenomeno": "Chuva",
+      "descricao": "Chuva leve"
+    },
+    {
+      "metar": "+TSRA",
+      "intensidade": "Forte",
+      "descritor": "Trovoada",
+      "fenomeno": "Chuva",
+      "descricao": "Trovoada com chuva forte"
+    },
+    {
+      "metar": "BCFG",
+      "descritor": "Banco",
+      "fenomeno": "Nevoeiro",
+      "descricao": "Banco de nevoeiro"
+    },
+    {
+      "metar": "SHSN",
+      "descritor": "Pancada",
+      "fenomeno": "Neve",
+      "descricao": "Pancadas de neve"
+    },
+    {
+      "metar": "FZRA",
+      "descritor": "Congelante",
+      "fenomeno": "Chuva",
+      "descricao": "Chuva congelante"
+    },
+    {
+      "metar": "VCSH",
+      "proximidade": "Próximo (VC)",
+      "descritor": "Pancada",
+      "descricao": "Pancadas próximas ao aeródromo"
+    }
+  ]
+}

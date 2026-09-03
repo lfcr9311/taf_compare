@@ -1,0 +1,8 @@
+pandas
+psycopg2-binary
+python-dateutil
+openpyxl
+reportlab
+flask
+
+
