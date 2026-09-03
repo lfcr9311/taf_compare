@@ -1,56 +1,72 @@
 #!/usr/bin/env python3
 """
-Frontend simples: TAF REDEMET vs METAR, pesquisa por aerodromo + todos os filtros.
+Frontend: TAF REDEMET vs METAR, pesquisa por aerodromo + todos os filtros.
 
-    python app.py [--host 0.0.0.0] [--port 8000] [--debug]
+    python app.py [--host 0.0.0.0] [--port 8000] [--debug]   # local
+    api/index.py                                             # serverless (Vercel)
 
-Fonte: excel/malha.csv (mesma dos relatorios). Tudo calculado ao vivo por filtro.
-Reaproveita helpers de main.py (season_of / period_of / strip_intensity / grupos).
+Le data/malha.parquet, gerado por build_cache.py a partir de excel/malha.csv.
+Rode `python build_cache.py` sempre que o malha.csv mudar.
+
+Importa core.py, nao main.py: assim o bundle serverless nao carrega reportlab
+nem psycopg2. Tudo e calculado ao vivo, por filtro, em cima do dataframe.
 """
 import argparse
+import os
 
 from collections import Counter
 
+import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request
 
-import main as M
+import core as M
 
 app = Flask(__name__)
 DF = None  # carregado em load()
 
-VIEWS = {'exato': ('E', M.DANGEROUS_CONDITIONS, 'taf_tok', 'met_tok'),
-         'base': ('B', M.DANGEROUS_BASE, 'taf_dng', 'met_dng')}
+# tag -> (sufixo das colunas booleanas, lista de condicoes).
+# 'E' compara o token cru; 'B' usa dangerous_hits (respeita +RA).
+VIEWS = {'exato': ('E', M.DANGEROUS_CONDITIONS),
+         'base':  ('B', M.DANGEROUS_BASE)}
 
 
 def load():
-    df = pd.read_csv(M.MALHA_CSV, sep=';', low_memory=False)
-    df['icao'] = df['Alternado'].astype(str).str.strip().str.upper()
-    df['arr'] = pd.to_datetime(df['Hora Chegada Alternado'], errors='coerce')
-    df = df[df['arr'].notna() & df['TAF REDEMET'].notna() & df['METAR'].notna()].copy()
-    df['taf'] = df['TAF REDEMET'].astype(str).str.strip()
-    df['met'] = df['METAR'].astype(str).str.strip()
-    df['season'] = df['arr'].apply(M.season_of)
-    df['period'] = df['arr'].apply(M.period_of)
-    df['month'] = df['arr'].dt.month.astype(int)
-    df['group'] = df['icao'].apply(lambda i: 'NavBrasil' if i in M.GROUP_A_SET else 'CIMAER')
-    df['equipment'] = df['EquipmentModel'].astype(str).str.strip()
-    df['forecast'] = df['taf'].ne('NSW')
-    df['observed'] = df['met'].ne('NSW')
-    df['taf_tok'] = df['taf'].str.split().apply(set)
-    df['met_tok'] = df['met'].str.split().apply(set)
-    df['taf_base'] = df['taf_tok'].apply(lambda s: {M.strip_intensity(t) for t in s})
-    df['met_base'] = df['met_tok'].apply(lambda s: {M.strip_intensity(t) for t in s})
-    df['ex_hit'] = [bool(a & b) for a, b in zip(df['taf_tok'], df['met_tok'])]
-    df['bs_hit'] = [bool(a & b) for a, b in zip(df['taf_base'], df['met_base'])]
-    # match da lista rastreada respeitando a intensidade (+RA nao vira RA)
-    df['taf_dng'] = df['taf_tok'].apply(M.dangerous_hits)
-    df['met_dng'] = df['met_tok'].apply(M.dangerous_hits)
-    # colunas booleanas por condicao -> requests rapidos
-    for tag, conds, tcol, mcol in VIEWS.values():
-        for c in conds:
-            df[f't{tag}::{c}'] = df[tcol].apply(lambda s, c=c: c in s)
-            df[f'm{tag}::{c}'] = df[mcol].apply(lambda s, c=c: c in s)
+    """Carrega o cache parquet (data/malha.parquet). Se nao existir, constroi
+    a partir do CSV na hora - util em dev, inviavel em serverless."""
+    if os.path.exists(M.MALHA_PARQUET):
+        df = pd.read_parquet(M.MALHA_PARQUET)
+    else:
+        import build_cache
+        df = build_cache.build()
+    _derive(df)
+    return df
+
+
+def _derive(df):
+    """Colunas derivadas, calculadas por categoria e espalhadas pelos codigos.
+
+    Sao so 39 valores distintos de TAF e 102 de METAR. Resolvendo cada conjunto
+    uma vez por categoria e indexando pelo codigo, as 263 mil linhas passam a
+    compartilhar ~140 frozensets em vez de criar um objeto por linha - era isso
+    que fazia o dataframe pesar 579 MB.
+    """
+    for src, base_col in (('taf', 'taf_base'), ('met', 'met_base')):
+        cats = df[src].cat.categories
+        codes = df[src].cat.codes.to_numpy()
+        toks = [frozenset(c.split()) for c in cats]
+        base = [frozenset(M.strip_intensity(t) for t in c.split()) for c in cats]
+        dng = [frozenset(M.dangerous_hits(c.split())) for c in cats]
+
+        # unica coluna de conjunto materializada: _forecast_analysis precisa dela
+        df[base_col] = [base[i] for i in codes]
+
+        pref = 't' if src == 'taf' else 'm'
+        for tag, conds in VIEWS.values():
+            sets = toks if tag == 'E' else dng
+            for c in conds:
+                hit = np.fromiter((c in s for s in sets), dtype=bool, count=len(sets))
+                df[f'{pref}{tag}::{c}'] = hit[codes]
     return df
 
 
@@ -111,7 +127,7 @@ def _presence(d):
 
 
 def _per_condition(d, view):
-    tag, conds, _tc, _mc = VIEWS[view]
+    tag, conds = VIEWS[view]
     out = []
     for c in conds:
         nt = int(d[f't{tag}::{c}'].sum())
@@ -130,7 +146,7 @@ def _per_condition(d, view):
 
 
 def _any_dangerous(d, view):
-    tag, conds, _tc, _mc = VIEWS[view]
+    tag, conds = VIEWS[view]
     tcols = [f't{tag}::{c}' for c in conds]
     mcols = [f'm{tag}::{c}' for c in conds]
     td = d[tcols].any(axis=1)
@@ -164,7 +180,7 @@ def _per_airport(d):
 
 
 def _breakdown(d, view, focus):
-    tag, _conds, _tc, _mc = VIEWS[view]
+    tag, _conds = VIEWS[view]
     col = f't{tag}::{focus}'
     if col not in d.columns:
         return {'focus': focus, 'n': 0, 'rows': []}

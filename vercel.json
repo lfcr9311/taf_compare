@@ -1,0 +1,14 @@
+{
+  "buildCommand": "echo sem etapa de build",
+  "outputDirectory": ".",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api/index" }
+  ],
+  "functions": {
+    "api/index.py": {
+      "memory": 1024,
+      "maxDuration": 30,
+      "includeFiles": "data/**"
+    }
+  }
+}

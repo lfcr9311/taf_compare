@@ -8,6 +8,7 @@ Azul TAF x METAR - tudo num arquivo.
   python main.py reports forecast_only        relatorio_previstos_{NavBrasil,CIMAER}.pdf
   python main.py all                         pipeline + relatorios
   python main.py list                         lista os relatorios
+  python build_cache.py                      gera data/malha.parquet (cache do painel)
   python app.py [--port 8000]                frontend web (pesquisa por aerodromo + filtros)
 
 Dois PDFs, mesmas 4 secoes cada, um por grupo de aerodromos:
@@ -19,6 +20,7 @@ Secoes (todas comparam TAF REDEMET vs METAR):
   3  condicoes perigosas TAF vs METAR por estacao x periodo
   4  consolidado TAF REDEMET vs METAR (presenca + perigosas + breakdown)
 
+Definicoes compartilhadas com o painel (estacao, periodo, condicoes) vivem em core.py.
 Matrizes granulares -> output/{taf_accuracy,dangerous}_matrix_{NavBrasil,CIMAER}.csv
 Pipeline steps: alternado, horario, metar, taf_redemet.
 """
@@ -31,6 +33,11 @@ from datetime import datetime
 
 import pandas as pd
 import psycopg2
+from dotenv import load_dotenv
+
+from core import (MALHA_CSV, MALHA_PARQUET, SEASONS, PERIODS, season_of, period_of,
+                  GROUP_A, GROUP_A_SET, DANGEROUS_CONDITIONS, DANGEROUS_ANY_INT,
+                  DANGEROUS_EXACT, DANGEROUS_BASE, strip_intensity, dangerous_hits)
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -47,13 +54,20 @@ log = logging.getLogger("azul")
 # CONFIG
 # ======================================================================
 
+# Credenciais vem do .env na raiz do projeto (ver .env.example). Variaveis ja
+# exportadas no ambiente tem precedencia sobre o arquivo.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
+# String de conexao unica (Neon, Supabase, Heroku...). Quando definida, ganha
+# das variaveis avulsas abaixo.
+DB_URL = os.getenv("DATABASE_URL") or os.getenv("DB_URL")
+
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5666")
 DB_NAME = os.getenv("DB_NAME", "metar_db")
 DB_USER = os.getenv("DB_USER", "metar_user")
-DB_PASS = os.getenv("DB_PASS", "metar_pass")
+DB_PASS = os.getenv("DB_PASS")          # sem default: segredo nao mora no codigo
 
-MALHA_CSV = "excel/malha.csv"          # semicolon-separated, edited in place
 AIRPORTS_CSV = "excel/airports.csv"    # ident,iata_code,... (IATA -> ICAO)
 ICAOS_TXT = "aiports.txt"              # 122 ICAOs, one per line
 OUTPUT_DIR = "output"                  # CSV matrices; PDFs go to repo root
@@ -73,40 +87,20 @@ EQUIPMENT_TO_AIRCRAFT = {
 }
 CRUISE_SPEEDS = {'A20N': 250, 'A21N': 250, 'AT76': 180, 'E195': 250, 'E295': 250}
 
-DANGEROUS_CONDITIONS = [
-    '-FZDZ', 'FZDZ', '+FZDZ', '-FZRA', 'FZRA', '+FZRA', 'FZFG',
-    'TS', '+TS', '+RA', '+SHRA', '+SN', '+SHSN', '+TSRA', 'TSRA',
-]
-
-# Custom aerodrome group (LISTA). full_report emits one PDF for these ICAOs and
-# one for all the others. 43 unique ICAOs (SBPP was listed twice).
-GROUP_A = [
-    'SBAR', 'SBAF', 'SBBG', 'SBBH', 'SBAE', 'SBBU', 'SBBW', 'SBCJ', 'SBCP', 'SBCZ',
-    'SBPP', 'SBGO', 'SBGR', 'SBHT', 'SBIT', 'SBIL', 'SBIZ', 'SBJP', 'SBJR', 'SBJZ',
-    'SBJV', 'SBKG', 'SBKP', 'SBLO', 'SBMA', 'SBMC', 'SBMK', 'SBMQ', 'SBMS', 'SBNF',
-    'SBPB', 'SBPJ', 'SBPK', 'SBPL', 'SBRJ', 'SBRP', 'SBSN', 'SBTE', 'SBTF', 'SBUF',
-    'SBUL', 'SBUR', 'SBVT',
-]
-GROUP_A_SET = set(GROUP_A)
-# A lista acima e intencionalmente assimetrica quanto a intensidade:
-#   FZDZ / FZRA / FZFG / TS / TSRA aparecem sem o '+'  -> qualquer intensidade conta
-#   +RA / +SHRA / +SN / +SHSN aparecem SO na forma forte -> exige o '+'
-# Colapsar tudo com lstrip('+-') transformava '+RA' em 'RA' e arrastava chuva
-# fraca e moderada para dentro do escopo. As listas abaixo preservam a regra.
-_DNG_BY_BASE = {}
-for _c in DANGEROUS_CONDITIONS:
-    _DNG_BY_BASE.setdefault(_c.lstrip('+-'), set()).add(_c)
-
-DANGEROUS_ANY_INT = sorted(b for b, t in _DNG_BY_BASE.items() if t != {'+' + b})
-DANGEROUS_EXACT = sorted(t for b, ts in _DNG_BY_BASE.items() if ts == {'+' + b} for t in ts)
-DANGEROUS_BASE = DANGEROUS_ANY_INT + DANGEROUS_EXACT
-
 
 # ======================================================================
 # HELPERS - database
 # ======================================================================
 
 def get_conn():
+    if DB_URL:
+        return psycopg2.connect(DB_URL)
+    if not DB_PASS:
+        raise RuntimeError(
+            "Nenhuma credencial de banco definida. Copie .env.example para .env "
+            "e preencha DATABASE_URL (ou DB_PASS). So o pipeline precisa do banco: "
+            "relatorios e app.py leem apenas os arquivos locais."
+        )
     return psycopg2.connect(host=DB_HOST, port=DB_PORT, database=DB_NAME,
                             user=DB_USER, password=DB_PASS)
 
@@ -164,24 +158,6 @@ def extract_wx_tokens(raw_metar):
             continue
         if _WX_TOKEN_RE.match(tok):
             out.append(tok)
-    return out
-
-
-def strip_intensity(tok):
-    """'-TSRA' -> 'TSRA'. 'VC' prefix kept (VCSH, VCTS)."""
-    return tok.lstrip('+-')
-
-
-def dangerous_hits(tokens):
-    """Rotulos de DANGEROUS_BASE satisfeitos por este conjunto de tokens.
-    'RA' nao casa (a lista so tem '+RA'); '-TSRA' casa como 'TSRA'."""
-    out = set()
-    for t in tokens:
-        if t in DANGEROUS_EXACT:
-            out.add(t)
-        b = strip_intensity(t)
-        if b in DANGEROUS_ANY_INT:
-            out.add(b)
     return out
 
 
@@ -253,32 +229,9 @@ def extract_taf_weather(rest_tokens):
 
 
 # ======================================================================
-# HELPERS - season / period / airport lists
-#
-# Estacoes astronomicas, hemisferio sul, limites fixos na media do periodo
-# (2016-2026); deriva interanual de +/- 1 dia nao modelada.
-#   Verao 21 Dez-19 Mar | Outono 20 Mar-20 Jun | Inverno 21 Jun-21 Set | Primavera 22 Set-20 Dez
-# Periodos: 4 faixas de 6 h em UTC.
+# HELPERS - listas de aerodromos
+# (estacao / periodo / condicoes rastreadas vivem em core.py)
 # ======================================================================
-
-SEASONS = ('Verao', 'Outono', 'Inverno', 'Primavera')
-PERIODS = ('00-06', '06-12', '12-18', '18-24')
-
-
-def season_of(dt):
-    md = dt.month * 100 + dt.day
-    if md >= 1221 or md <= 319:
-        return 'Verao'
-    if md <= 620:
-        return 'Outono'
-    if md <= 921:
-        return 'Inverno'
-    return 'Primavera'
-
-
-def period_of(dt):
-    h = dt.hour
-    return '00-06' if h < 6 else '06-12' if h < 12 else '12-18' if h < 18 else '18-24'
 
 
 def load_icaos_txt(path=ICAOS_TXT):

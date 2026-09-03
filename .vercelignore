@@ -1,0 +1,14 @@
+# O painel le so data/malha.parquet. Nada mais precisa subir.
+excel/
+output/
+*.pdf
+*.html
+init.sql
+docker-compose.yml
+aiports.txt
+fenomenos_metar.json
+main.py
+build_cache.py
+requirements-full.txt
+__pycache__/
+.venv/
