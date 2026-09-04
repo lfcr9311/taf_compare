@@ -1,6 +1,0 @@
--r requirements.txt
-psycopg2-binary
-reportlab
-openpyxl
-python-dateutil
-python-dotenv

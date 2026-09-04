@@ -1,3 +1,9 @@
 flask
 pandas
 pyarrow
+psycopg2-binary
+reportlab
+openpyxl
+python-dateutil
+python-dotenv
+numpy
