@@ -38,7 +38,10 @@ def _cors(resp):
     resp.headers['Access-Control-Allow-Origin'] = CORS_ORIGIN
     resp.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
     resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-    resp.headers['Cache-Control'] = 'public, max-age=300'
+    if request.path == '/health':
+        resp.headers['Cache-Control'] = 'no-store'
+    else:
+        resp.headers['Cache-Control'] = 'public, max-age=300'
     return resp
 
 # tag -> (sufixo das colunas booleanas, lista de condicoes).
@@ -331,13 +334,26 @@ def api_stats():
     })
 
 
+@app.get('/health')
+def health():
+    """Sonda de disponibilidade. 200 so quando o dataframe esta carregado e
+    tem linhas; 503 caso contrario, para o balanceador tirar a instancia."""
+    ready = DF is not None and len(DF) > 0
+    return jsonify({
+        'status': 'ok' if ready else 'unavailable',
+        'rows': int(len(DF)) if DF is not None else 0,
+        'airports': int(DF['icao'].nunique()) if ready else 0,
+        'cache': 'parquet' if os.path.exists(M.MALHA_PARQUET) else 'csv',
+    }), (200 if ready else 503)
+
+
 @app.get('/')
 def index():
     """A pagina vive noutro repositorio (taf_compare_web). Aqui so a API."""
     return jsonify({
         'service': 'taf-compare-api',
         'rows': int(len(DF)) if DF is not None else None,
-        'endpoints': ['/api/meta', '/api/stats'],
+        'endpoints': ['/health', '/api/meta', '/api/stats'],
     })
 
 
