@@ -36,9 +36,15 @@ def load():
     a partir do CSV na hora - util em dev, inviavel em serverless."""
     if os.path.exists(M.MALHA_PARQUET):
         df = pd.read_parquet(M.MALHA_PARQUET)
-    else:
-        import build_cache
+    elif os.path.exists(M.MALHA_CSV):
+        import build_cache            # so existe em dev; cortado pelo .vercelignore
         df = build_cache.build()
+    else:
+        raise RuntimeError(
+            f"Cache nao encontrado em {M.MALHA_PARQUET} e sem {M.MALHA_CSV} para "
+            f"reconstruir. Em deploy, confira 'includeFiles' no vercel.json e se "
+            f"data/malha.parquet foi commitado. Local: rode python build_cache.py."
+        )
     _derive(df)
     return df
 
